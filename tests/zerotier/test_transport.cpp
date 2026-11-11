@@ -10,6 +10,7 @@
 #include <sys/ioctl.h>
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <chrono>
 #ifdef TEST_MODERN_ENET
@@ -129,7 +130,9 @@ static void testModernEnet() {
 int main(int argc, char**) {
     if (argc > 1) {localIp=0xac1b0009;peerIp=0xac1b0012;}
     runtime().peer=peerIp;
-    const char *root="/tmp/moonlight-zt-tests/state";mkdir(root,0700);
+    char stateDirectory[]="/tmp/moonlight-zt-state-XXXXXX";
+    const char *root=mkdtemp(stateDirectory);
+    assert(root);
     uint64_t known[2]={0xabcdef,0},unknown[2]={};char secret[16];
     assert(writeState(root,ZT_STATE_OBJECT_IDENTITY_SECRET,known,"secret",6));
     assert(readState(root,ZT_STATE_OBJECT_IDENTITY_SECRET,unknown,secret,sizeof(secret))==6);
@@ -137,6 +140,7 @@ int main(int argc, char**) {
     assert(readState(root,ZT_STATE_OBJECT_IDENTITY_SECRET,unknown,secret,2)==-1);
     assert(writeState(root,ZT_STATE_OBJECT_IDENTITY_SECRET,known,nullptr,-1));
     assert(readState(root,ZT_STATE_OBJECT_IDENTITY_SECRET,unknown,secret,sizeof(secret))==-1);
+    assert(rmdir(root)==0);
     setTransportEnabled(true);
     auto &r=runtime();r.running=true;r.vnet.reset();r.vnet.configure(localMac,localIp,0xffffff00,1500);
     r.vnet.setEmit([](void*,uint64_t m,uint16_t t,const void *p,unsigned n){auto *b=(const uint8_t*)p;runtime().output.push_back({m,t,{b,b+n}});},nullptr);
