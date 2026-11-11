@@ -6,7 +6,9 @@
 
 **Seu PC no Nintendo Switch, mesmo em outra rede.**
 
-Um fork do Moonlight-Switch com ZeroTier integrado ao próprio aplicativo.
+Baseado no [Moonlight-Switch de XITRIX e seus colaboradores](https://github.com/XITRIX/Moonlight-Switch), com ZeroTier integrado ao próprio aplicativo.
+
+Parte do ecossistema [Moonlight Game Streaming](https://moonlight-stream.org/). Este fork é independente e não é uma versão oficial da equipe Moonlight.
 
 [![Nintendo Switch](https://img.shields.io/badge/Nintendo_Switch-Homebrew-E60012?style=flat-square)](#o-que-voce-precisa)
 [![ZeroTier](https://img.shields.io/badge/ZeroTier-Integrado-1675E8?style=flat-square)](#configurar-o-zerotier)
@@ -169,13 +171,17 @@ acompanham o projeto. Detalhes em [avisos de terceiros](THIRD_PARTY_NOTICES.md).
 
 ## Créditos e licenças
 
-Este projeto se apoia no trabalho de **XITRIX/Moonlight-Switch**, **Moonlight**,
-**ZeroTier**, **Jul879n/sys-GRID0-tcp**, **lwIP**, **curl**, **FFmpeg/Averne** e dos
-outros autores dos componentes vendorizados.
+Este projeto só é possível graças aos autores e colaboradores dos projetos originais:
+
+- **[XITRIX/Moonlight-Switch](https://github.com/XITRIX/Moonlight-Switch)** — base deste fork, incluindo a interface e o cliente para Nintendo Switch. Créditos a XITRIX e a todos os [colaboradores do projeto original](https://github.com/XITRIX/Moonlight-Switch/graphs/contributors).
+- **[Moonlight Game Streaming](https://moonlight-stream.org/)** — projeto original de streaming e comunidade que desenvolve seus clientes e bibliotecas. Conheça os [projetos oficiais no GitHub](https://github.com/moonlight-stream).
+- **ZeroTier**, **Jul879n/sys-GRID0-tcp**, **lwIP**, **curl**, **FFmpeg/Averne** e os demais autores dos componentes vendorizados — dependências e trabalho que sustentam esta integração.
+
+A contribuição deste fork é a integração do ZeroTier ao Moonlight-Switch. O nome e a imagem do Moonlight são usados para identificar a origem do projeto; não indicam endosso dos autores originais.
 
 O aplicativo usa GPL-3.0; os componentes mantêm os termos e avisos descritos em
 [LICENSE](LICENSE), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) e
 [revisão de licenças](docs/LICENCAS-REVISAO.md). Ao distribuir, preserve os fontes,
 scripts, créditos e licenças correspondentes.
 
-**Fork independente. Não é uma versão oficial da Nintendo, ZeroTier ou XITRIX.**
+**Fork independente. Não é uma versão oficial da equipe Moonlight, de XITRIX, da Nintendo ou da ZeroTier.**
