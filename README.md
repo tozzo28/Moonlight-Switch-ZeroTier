@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="icon.jpg" alt="Moonlight" width="92" />
+<img src="modern/resources/img/moonlight_icon.jpg" alt="Moonlight" width="92" />
 
 # Moonlight Switch + ZeroTier
 
