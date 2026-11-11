@@ -1,0 +1,642 @@
+#include "FFmpegVideoDecoder.hpp"
+#include "AVFrameHolder.hpp"
+#include "FFmpegVideoDecoderPlatformHelpers.hpp"
+#include "Settings.hpp"
+#include "borealis.hpp"
+#include "MoonlightSession.hpp"
+
+#if defined(_WIN32)
+#include <SDL.h>
+#endif
+
+extern "C" {
+#include <libavutil/hwcontext.h>
+}
+
+// Disables the deblocking filter at the cost of image quality
+#define DISABLE_LOOP_FILTER 0x1
+// Uses the low latency decode flag (disables multithreading)
+#define LOW_LATENCY_DECODE 0x2
+
+//#if defined(PLATFORM_TVOS)
+//#define DECODER_BUFFER_SIZE 92 * 1024 * 4
+//#else
+//#define DECODER_BUFFER_SIZE 92 * 1024 * 2
+//#endif
+#define DECODER_BUFFER_SIZE (1024 * 1024)
+
+#if defined(PLATFORM_ANDROID)
+#include <jni.h>
+#include <libavcodec/jni.h>
+#include <libavutil/hwcontext_mediacodec.h>
+
+//static JavaVM *mJavaVM = NULL;
+//JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved)
+//{
+////    av_jni_set_java_vm(vm, NULL);
+//    return JNI_VERSION_1_4;
+//}
+#endif
+
+FFmpegVideoDecoder::FFmpegVideoDecoder() {
+//    AVBufferRef* deviceRef = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_MEDIACODEC);
+//    AVHWDeviceContext* ctx = (AVHWDeviceContext*)deviceRef->data;
+//    AVMediaCodecDeviceContext* hwctx = (AVMediaCodecDeviceContext*)ctx->hwctx;
+////    hwctx->surface = ;
+//    av_hwdevice_ctx_init(deviceRef);
+}
+
+FFmpegVideoDecoder::~FFmpegVideoDecoder() = default;
+
+void ffmpegLog(void* ptr, int level, const char* fmt, va_list vargs) {
+    std::string message;
+    va_list ap_copy;
+    va_copy(ap_copy, vargs);
+    size_t len = vsnprintf(nullptr, 0, fmt, ap_copy);
+    message.resize(len + 1);  // need space for NUL
+    vsnprintf(&message[0], len + 1,fmt, vargs);
+    message.resize(len);  // remove the NUL
+    brls::Logger::debug("FFmpeg [LOG]: {}", message.c_str());
+}
+
+int FFmpegVideoDecoder::setup(int video_format, int width, int height,
+                              int redraw_rate, void* context, int dr_flags) {
+    m_stream_fps = redraw_rate;
+#if defined(_WIN32) && defined(USE_D3D11_RENDERER)
+    ffmpeg::decoder::resetD3D11State(m_d3d11);
+#endif
+
+    std::string format;
+    switch (video_format) {
+        case VIDEO_FORMAT_H264:
+            format = "H264";
+            break;
+        case VIDEO_FORMAT_H265:
+            format = "HEVC";
+            break;
+        case VIDEO_FORMAT_H265_MAIN10:
+            format = "HEVC HDR";
+            break;
+        case VIDEO_FORMAT_AV1_MAIN8:
+            format = "AV1";
+            break;
+        case VIDEO_FORMAT_AV1_MAIN10:
+            format = "AV1 HDR";
+            break;
+        default:
+            format = "UNKNOWN";
+            break;
+    }
+    brls::Logger::debug("FFMpeg's AVCodec version: {}.{}.{}", AV_VERSION_MAJOR(avcodec_version()), AV_VERSION_MINOR(avcodec_version()), AV_VERSION_MICRO(avcodec_version()));
+    brls::Logger::info(
+        "FFmpeg: Setup with format: {}, width: {}, height: {}, fps: {}", format, width, height, redraw_rate);
+
+    av_log_set_level(AV_LOG_WARNING);
+    // av_log_set_callback(&ffmpegLog); // Uncomment to see FFMpeg logs
+#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(58, 10, 100)
+    avcodec_register_all();
+#endif
+
+    m_packet = av_packet_alloc();
+
+    int perf_lvl = LOW_LATENCY_DECODE;
+
+#ifdef PLATFORM_ANDROID
+    if (video_format & VIDEO_FORMAT_MASK_H264) {
+        m_decoder = avcodec_find_decoder_by_name("h264_mediacodec");
+    } else if (video_format & VIDEO_FORMAT_MASK_H265) {
+        m_decoder = avcodec_find_decoder_by_name("hevc_mediacodec");
+    } else {
+        // Unsupported decoder type
+    }
+#else
+    if (video_format & VIDEO_FORMAT_MASK_H264) {
+        m_decoder = avcodec_find_decoder(AV_CODEC_ID_H264);
+    } else if (video_format & VIDEO_FORMAT_MASK_H265) {
+        m_decoder = avcodec_find_decoder(AV_CODEC_ID_HEVC);
+    } else {
+        // Unsupported decoder type
+    }
+#endif
+
+    if (m_decoder == nullptr) {
+        brls::Logger::error("FFmpeg: Couldn't find decoder");
+        return -1;
+    }
+
+    m_decoder_context = avcodec_alloc_context3(m_decoder);
+    if (m_decoder_context == nullptr) {
+        brls::Logger::error("FFmpeg: Couldn't allocate context");
+        return -1;
+    }
+
+    m_decoder_context->flags |= AV_CODEC_FLAG_OUTPUT_CORRUPT;
+    m_decoder_context->flags2 |= AV_CODEC_FLAG2_SHOW_ALL;
+    m_decoder_context->flags2 |= AV_CODEC_FLAG2_FAST;
+
+    if (perf_lvl & DISABLE_LOOP_FILTER)
+        // Skip the loop filter for performance reasons
+        m_decoder_context->skip_loop_filter = AVDISCARD_ALL;
+
+    int err = 0;
+    const int decoder_threads = Settings::instance().decoder_threads();
+    bool hw_decode_active = false;
+
+    AVHWDeviceType hwType = AV_HWDEVICE_TYPE_NONE;
+#if defined(PLATFORM_SWITCH)
+    hwType = AV_HWDEVICE_TYPE_NVTEGRA;
+#elif defined(PLATFORM_ANDROID)
+    hwType = AV_HWDEVICE_TYPE_MEDIACODEC;
+#elif defined(USE_D3D11_RENDERER)
+    ffmpeg::decoder::prepareD3D11Setup(m_d3d11, video_format);
+    hwType = AV_HWDEVICE_TYPE_D3D11VA;
+#elif defined(PLATFORM_APPLE)
+    hwType = AV_HWDEVICE_TYPE_VIDEOTOOLBOX;
+#endif
+
+    if (Settings::instance().use_hw_decoding() && hwType != AV_HWDEVICE_TYPE_NONE) {
+#if defined(USE_D3D11_RENDERER)
+        if (hwType == AV_HWDEVICE_TYPE_D3D11VA) {
+            err = ffmpeg::decoder::initializeD3D11HardwareDevice(m_d3d11, hw_device_ctx);
+        } else
+#endif
+        {
+            err = av_hwdevice_ctx_create(&hw_device_ctx, hwType, nullptr, nullptr, 0);
+        }
+
+        if (err < 0) {
+            char error[512];
+            av_strerror(err, error, sizeof(error));
+#if defined(USE_D3D11_RENDERER)
+            if (hwType == AV_HWDEVICE_TYPE_D3D11VA) {
+                ffmpeg::decoder::logD3D11HardwareInitFailure(m_d3d11, error);
+            } else
+#endif
+            brls::Logger::error("FFmpeg: Error initializing hardware decoder - {}", error);
+#if defined(PLATFORM_SWITCH) && defined(BOREALIS_USE_DEKO3D)
+            return err;
+#endif
+        } else {
+            m_decoder_context->hw_device_ctx = av_buffer_ref(hw_device_ctx);
+            hw_decode_active = m_decoder_context->hw_device_ctx != nullptr;
+
+#if defined(USE_D3D11_RENDERER)
+            if (hwType == AV_HWDEVICE_TYPE_D3D11VA && hw_decode_active) {
+                ffmpeg::decoder::configureD3D11DecoderContext(m_d3d11, m_decoder_context);
+            }
+#endif
+        }
+    } else {
+        brls::Logger::warning("FFmpeg: HW decoding disabled or unsupported by Platform");
+    }
+
+    const bool supports_slice_threading =
+        (video_format & (VIDEO_FORMAT_MASK_H264 | VIDEO_FORMAT_MASK_H265)) != 0;
+    const bool use_decoder_threads =
+        decoder_threads > 1 && supports_slice_threading;
+
+    if ((perf_lvl & LOW_LATENCY_DECODE) && !use_decoder_threads)
+        // Use low delay only when decoding stays effectively single threaded.
+        m_decoder_context->flags |= AV_CODEC_FLAG_LOW_DELAY;
+
+    if (use_decoder_threads) {
+        m_decoder_context->thread_type = FF_THREAD_SLICE;
+        m_decoder_context->thread_count = decoder_threads;
+    } else {
+        m_decoder_context->thread_type = FF_THREAD_FRAME;
+        m_decoder_context->thread_count = 1;
+    }
+
+    m_decoder_context->width = width;
+    m_decoder_context->height = height;
+#if defined(PLATFORM_SWITCH)
+#ifdef BOREALIS_USE_DEKO3D
+    if (ffmpeg::decoder::configureDeko3DDecoderContext(m_decoder_context, hw_decode_active) < 0) {
+        return -1;
+    }
+#else
+    m_decoder_context->pix_fmt = AV_PIX_FMT_NV12;
+#endif
+#else
+//    m_decoder_context->pix_fmt = AV_PIX_FMT_NV12;
+#endif
+
+    brls::Logger::info("FFmpeg: Decoder threading mode: hw={} threads={} low_delay={} codec={}",
+                       hw_decode_active ? "on" : "off",
+                       m_decoder_context->thread_count,
+                       (m_decoder_context->flags & AV_CODEC_FLAG_LOW_DELAY) != 0 ? "on" : "off",
+                       supports_slice_threading ? "slice" : "frame");
+
+    err = avcodec_open2(m_decoder_context, m_decoder, nullptr);
+    if (err < 0) {
+        char error[512];
+        av_strerror(err, error, sizeof(error));
+        brls::Logger::error("FFmpeg: Couldn't open codec - {}", error);
+        return err;
+    }
+
+    brls::Logger::info("FFmpeg: Active decoder threading: requested_threads={} active_type={}",
+                       m_decoder_context->thread_count,
+                       m_decoder_context->active_thread_type);
+
+    m_use_zero_copy_holder = false;
+#if defined(PLATFORM_SWITCH) && defined(BOREALIS_USE_DEKO3D)
+    m_use_zero_copy_holder = ffmpeg::decoder::useDeko3DZeroCopyHolder(hw_decode_active);
+#elif defined(USE_D3D11_RENDERER)
+    m_use_zero_copy_holder = ffmpeg::decoder::useD3D11ZeroCopyHolder(m_d3d11);
+#endif
+    AVFrameHolder::instance().prepare(m_use_zero_copy_holder);
+
+    // One extra frame for decoding processing
+    if (!m_use_zero_copy_holder) {
+        m_frames_size = Settings::instance().frames_queue_size() + 1;
+        m_frames = new AVFrame*[m_frames_size];
+
+        tmp_frame = av_frame_alloc();
+        for (int i = 0; i < m_frames_size; i++) {
+            auto& frame = m_frames[i];
+            frame = av_frame_alloc();
+            if (frame == nullptr) {
+                brls::Logger::error("FFmpeg: Couldn't allocate frame");
+                return -1;
+            }
+
+#if defined(PLATFORM_SWITCH) && defined(BOREALIS_USE_DEKO3D)
+            frame->format = AV_PIX_FMT_NVTEGRA;
+#elif defined(PLATFORM_ANDROID)
+            frame->format = AV_PIX_FMT_MEDIACODEC;
+#else
+            if (video_format & VIDEO_FORMAT_MASK_10BIT)
+                frame->format = AV_PIX_FMT_P010;
+            else
+                frame->format = AV_PIX_FMT_NV12;
+#endif
+            frame->width  = width;
+            frame->height = height;
+
+// Need to align Switch frame to 256, need to de reviewed
+#if defined(PLATFORM_SWITCH) && !defined(BOREALIS_USE_DEKO3D)
+            int err = av_frame_get_buffer(frame, 256);
+            if (err < 0) {
+                char errs[64];
+                brls::Logger::error("FFmpeg: Couldn't allocate frame buffer: {}", av_make_error_string(errs, 64, err));
+                return -1;
+            }
+
+            for (int j = 0; j < 2; j++) {
+                uintptr_t ptr = (uintptr_t)frame->data[j];
+                uintptr_t dst = (((ptr)+(256)-1)&~((256)-1));
+                uintptr_t gap = dst - ptr;
+                frame->data[j] += gap;
+            }
+#endif
+        }
+    }
+
+    m_ffmpeg_buffer =
+        (char*)malloc(DECODER_BUFFER_SIZE + AV_INPUT_BUFFER_PADDING_SIZE);
+    if (m_ffmpeg_buffer == nullptr) {
+        brls::Logger::error("FFmpeg: Not enough memory");
+        cleanup();
+        return -1;
+    }
+
+    brls::Logger::info("FFmpeg: Setup done!");
+    return DR_OK;
+}
+
+void FFmpegVideoDecoder::cleanup() {
+    brls::Logger::info("FFmpeg: Cleanup...");
+
+    av_packet_free(&m_packet);
+
+    if (hw_device_ctx) {
+        av_buffer_unref(&hw_device_ctx);
+    }
+
+    if (m_decoder_context) {
+        avcodec_free_context(&m_decoder_context);
+    }
+
+    if (m_frames) {
+        for (int i = 0; i < m_frames_size; i++) {
+            av_frame_free(&m_frames[i]);
+        }
+    }
+
+    if (tmp_frame) {
+        av_frame_free(&tmp_frame);
+    }
+
+    if (m_ffmpeg_buffer) {
+        free(m_ffmpeg_buffer);
+        m_ffmpeg_buffer = nullptr;
+    }
+
+    AVFrameHolder::instance().cleanup();
+    delete[] m_frames;
+    m_frames = nullptr;
+    m_frames_size = 0;
+
+    brls::Logger::info("FFmpeg: Cleanup done!");
+}
+
+int FFmpegVideoDecoder::submit_decode_unit(PDECODE_UNIT decode_unit) {
+    if (decode_unit->fullLength < DECODER_BUFFER_SIZE) {
+        PLENTRY entry = decode_unit->bufferList;
+
+        if (m_video_decode_stats_progress.measurement_start_timestamp == 0) {
+            m_video_decode_stats_progress.measurement_start_timestamp = LiGetMillis();
+        }
+
+        if (!m_last_frame) {
+            m_last_frame = decode_unit->frameNumber;
+        } else {
+            // Any frame number greater than m_LastFrameNumber + 1 represents a
+            // dropped frame
+            m_video_decode_stats_progress.network_dropped_frames +=
+                decode_unit->frameNumber - (m_last_frame + 1);
+            m_video_decode_stats_progress.total_frames +=
+                decode_unit->frameNumber - (m_last_frame + 1);
+            m_last_frame = decode_unit->frameNumber;
+        }
+
+        m_video_decode_stats_progress.current_received_frames++;
+        m_video_decode_stats_progress.total_frames++;
+
+        int length = 0;
+        while (entry != nullptr) {
+            if (length > DECODER_BUFFER_SIZE) {
+                brls::Logger::error("FFmpeg: Big buffer to decode... !");
+            }
+
+            memcpy(m_ffmpeg_buffer + length, entry->data, entry->length);
+            length += entry->length;
+            entry = entry->next;
+        }
+
+        if (length <= DECODER_BUFFER_SIZE) {
+            memset(m_ffmpeg_buffer + length, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+        }
+
+        m_video_decode_stats_progress.current_reassembly_time += LiGetMillis() - (decode_unit->receiveTimeUs / 1000);
+        m_frames_in++;
+
+        uint64_t before_decode = LiGetMillis();
+
+        if (length > DECODER_BUFFER_SIZE) {
+            brls::Logger::error("FFmpeg: Big buffer to decode...");
+        }
+
+        const int decoded_frames = decode(m_ffmpeg_buffer, length);
+        if (decoded_frames >= 0) {
+            if (decoded_frames == 0) {
+                return DR_OK;
+            }
+
+            m_frames_out += decoded_frames;
+
+            auto decodeTime = LiGetMillis() - before_decode;
+            m_video_decode_stats_progress.current_decode_time += decodeTime;
+
+            // Also count the frame-to-frame delay if the decoder is delaying
+            // frames until a subsequent frame is submitted.
+            int pending_frames = m_frames_in - m_frames_out;
+            if (pending_frames < 0) {
+                pending_frames = 0;
+            }
+            m_video_decode_stats_progress.current_decode_time +=
+                pending_frames * (1000 / m_stream_fps);
+            m_video_decode_stats_progress.current_decoded_frames += decoded_frames;
+
+            const int time_interval = 60;
+            timeCount += decodeTime;
+            if (timeCount >= time_interval) {
+                // brls::Logger::debug("FPS: {}", frames / 5.0f);
+
+                m_video_decode_stats_cache = m_video_decode_stats_progress;
+                m_video_decode_stats_progress = {};
+
+                // Preserve dropped frames count
+                m_video_decode_stats_progress.total_received_frames = m_video_decode_stats_cache.total_received_frames + m_video_decode_stats_cache.current_received_frames;
+                m_video_decode_stats_progress.total_decoded_frames = m_video_decode_stats_cache.total_decoded_frames + m_video_decode_stats_cache.current_decoded_frames;
+                m_video_decode_stats_progress.total_reassembly_time = m_video_decode_stats_cache.total_reassembly_time + m_video_decode_stats_cache.current_reassembly_time;
+                m_video_decode_stats_progress.total_decode_time = m_video_decode_stats_cache.total_decode_time + m_video_decode_stats_cache.current_decode_time;
+
+                m_video_decode_stats_progress.network_dropped_frames = m_video_decode_stats_cache.network_dropped_frames;
+
+                uint64_t now = LiGetMillis();
+                m_video_decode_stats_cache.current_host_fps =
+                    (float)m_video_decode_stats_cache.total_frames /
+                    ((float)(now - m_video_decode_stats_cache.measurement_start_timestamp) /
+                    1000);
+                m_video_decode_stats_cache.current_received_fps =
+                        (float)m_video_decode_stats_cache.current_received_frames /
+                        ((float)(now - m_video_decode_stats_cache.measurement_start_timestamp) /
+                    1000);
+                m_video_decode_stats_cache.current_decoded_fps =
+                        (float)m_video_decode_stats_cache.current_decoded_frames /
+                        ((float)(now - m_video_decode_stats_cache.measurement_start_timestamp) /
+                    1000);
+
+                m_video_decode_stats_cache.current_receive_time = (float) m_video_decode_stats_cache.current_reassembly_time /
+                                                                  (float) m_video_decode_stats_cache.current_received_frames;
+                m_video_decode_stats_cache.current_decoding_time = (float) m_video_decode_stats_cache.current_decode_time /
+                                                                   (float) m_video_decode_stats_cache.current_decoded_frames;
+
+                m_video_decode_stats_cache.session_receive_time = (float) m_video_decode_stats_cache.total_reassembly_time /
+                                                                  (float) m_video_decode_stats_cache.total_received_frames;
+                m_video_decode_stats_cache.session_decoding_time = (float) m_video_decode_stats_cache.total_decode_time /
+                                                                   (float) m_video_decode_stats_cache.total_decoded_frames;
+
+                timeCount -= time_interval;
+            }
+
+        }
+        else {
+            if (MoonlightSession::activeSession() != nullptr)
+                MoonlightSession::activeSession()->restart();
+        }
+    } else {
+        brls::Logger::error("FFmpeg: Big buffer to decode... 2");
+    }
+    return DR_OK;
+}
+
+int FFmpegVideoDecoder::capabilities() const {
+#if defined(__SWITCH__)
+    return CAPABILITY_SLICES_PER_FRAME(4);
+#else
+    return CAPABILITY_SLICES_PER_FRAME(4) | CAPABILITY_DIRECT_SUBMIT;
+#endif
+}
+
+int FFmpegVideoDecoder::decode(char* indata, int inlen) {
+    m_packet->data = (uint8_t*)indata;
+    m_packet->size = inlen;
+
+#if defined(_WIN32)
+    (void) SDL_SetThreadPriority(SDL_THREAD_PRIORITY_HIGH);
+#elif !defined(PLATFORM_SWITCH)
+    int policy;
+    sched_param params{};
+    pthread_getschedparam(pthread_self(), &policy, &params);
+    params.sched_priority = sched_get_priority_max(policy);
+    pthread_setschedparam(pthread_self(), policy, &params);
+#endif
+
+//    m_decoder_context->skip_frame = AVDISCARD_ALL;
+
+    int decoded_frames = 0;
+    int err = avcodec_send_packet(m_decoder_context, m_packet);
+    if (err == AVERROR(EAGAIN)) {
+        decoded_frames = drain_frames();
+        if (decoded_frames < 0) {
+            return decoded_frames;
+        }
+
+        err = avcodec_send_packet(m_decoder_context, m_packet);
+    }
+
+    if (err != 0) {
+        char error[512];
+        av_strerror(err, error, sizeof(error));
+        brls::Logger::error("FFmpeg: Decode failed - {}", error);
+        return err;
+    }
+
+    const int drained_frames = drain_frames();
+    if (drained_frames < 0) {
+        return drained_frames;
+    }
+
+    return decoded_frames + drained_frames;
+}
+
+int FFmpegVideoDecoder::drain_frames() {
+    int decoded_frames = 0;
+
+    while (true) {
+        AVFrame* frame = nullptr;
+        const int err = get_frame(true, &frame);
+        if (err == AVERROR(EAGAIN) || err == AVERROR_EOF) {
+            return decoded_frames;
+        }
+
+        if (err < 0) {
+            return err;
+        }
+
+        if (!frame) {
+            continue;
+        }
+
+        if (m_use_zero_copy_holder) {
+            AVFrameHolder::instance().pushTransferred(frame);
+        } else {
+            AVFrameHolder::instance().push(frame);
+        }
+
+        decoded_frames++;
+    }
+}
+
+int FFmpegVideoDecoder::get_frame(bool native_frame, AVFrame** frame) {
+    int err;
+    *frame = nullptr;
+    AVFrame* resultFrame = nullptr;
+    AVFrame* decodeFrame = resultFrame;
+
+    if (m_use_zero_copy_holder) {
+        resultFrame = AVFrameHolder::instance().acquireWriteFrame();
+        if (!resultFrame) {
+            brls::Logger::error("FFmpeg: Couldn't acquire frame from holder");
+            return AVERROR(EAGAIN);
+        }
+        decodeFrame = resultFrame;
+    } else {
+        resultFrame = m_frames[m_next_frame];
+        decodeFrame = resultFrame;
+    }
+
+#if !defined(PLATFORM_ANDROID) && !defined(BOREALIS_USE_DEKO3D) && !defined(USE_METAL_RENDERER)
+    if (hw_device_ctx && !m_use_zero_copy_holder) {
+        // For HW->SW transfer path we decode into a temporary hardware frame.
+        av_frame_unref(resultFrame);
+        decodeFrame = tmp_frame;
+    }
+#endif
+
+    if ((err = avcodec_receive_frame(m_decoder_context, decodeFrame)) < 0) {
+        if (err == AVERROR(EAGAIN)) {
+            if (m_use_zero_copy_holder) {
+                AVFrameHolder::instance().recycleWriteFrame(resultFrame);
+            }
+            return err;
+        }
+
+        char a[AV_ERROR_MAX_STRING_SIZE] = { 0 };
+        brls::Logger::error("FFmpeg: Error receiving frame with error {}",  av_make_error_string(a, AV_ERROR_MAX_STRING_SIZE, err));
+        if (m_use_zero_copy_holder) {
+            AVFrameHolder::instance().recycleWriteFrame(resultFrame);
+        }
+        return err;
+    }
+
+    if (hw_device_ctx) {
+#if defined(BOREALIS_USE_DEKO3D) || defined(USE_METAL_RENDERER) || defined(PLATFORM_ANDROID)
+        // Keep hardware-backed frame references per queue slot.
+        resultFrame = decodeFrame;
+#elif defined(USE_D3D11_RENDERER)
+        if (m_use_zero_copy_holder) {
+            resultFrame = decodeFrame;
+        } else {
+            if ((err = av_hwframe_transfer_data(resultFrame, decodeFrame, 0)) < 0) {
+                char a[AV_ERROR_MAX_STRING_SIZE] = { 0 };
+                brls::Logger::error("FFmpeg: Error transferring the data to system memory with error {}",  av_make_error_string(a, AV_ERROR_MAX_STRING_SIZE, err));
+                return err;
+            }
+
+            av_frame_copy_props(resultFrame, decodeFrame);
+        }
+#else
+#if defined(PLATFORM_SWITCH) && !defined(BOREALIS_USE_DEKO3D)
+        for (int i = 0; i < 2; ++i) {
+            if (((uintptr_t)resultFrame->data[i] & 0xff) || (resultFrame->linesize[i] & 0xff)) {
+                brls::Logger::error("Frame address/pitch not aligned to 256, falling back to cpu transfer");
+                break;
+            }
+        }
+#endif
+
+        // Copy hardware frame into software frame
+        if ((err = av_hwframe_transfer_data(resultFrame, decodeFrame, 0)) < 0) {
+            char a[AV_ERROR_MAX_STRING_SIZE] = { 0 };
+            brls::Logger::error("FFmpeg: Error transferring the data to system memory with error {}",  av_make_error_string(a, AV_ERROR_MAX_STRING_SIZE, err));
+            return err;
+        }
+
+        av_frame_copy_props(resultFrame, decodeFrame);
+#endif
+    } else {
+        resultFrame = decodeFrame;
+    }
+
+    if (!m_use_zero_copy_holder) {
+        m_current_frame = m_next_frame;
+        m_next_frame = (m_current_frame + 1) % m_frames_size;
+    }
+    if (native_frame) {
+        *frame = resultFrame;
+        return 0;
+    }
+
+    if (m_use_zero_copy_holder) {
+        AVFrameHolder::instance().recycleWriteFrame(resultFrame);
+    }
+    return 0;
+}
+
+VideoDecodeStats* FFmpegVideoDecoder::video_decode_stats() {
+    return (VideoDecodeStats*)&m_video_decode_stats_cache;
+}

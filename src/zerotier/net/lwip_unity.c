@@ -1,0 +1,18 @@
+/* lwIP (BSD) en una sola unidad de compilación: evita colisiones de nombres de
+ * archivo (ip.c, mem.c, sys.c...) con el resto de las fuentes en VPATH. */
+#include "../lwip/src/core/def.c"
+#include "../lwip/src/core/init.c"
+#include "../lwip/src/core/inet_chksum.c"
+#include "../lwip/src/core/ip.c"
+#include "../lwip/src/core/mem.c"
+#include "../lwip/src/core/memp.c"
+#include "../lwip/src/core/netif.c"
+#include "../lwip/src/core/pbuf.c"
+#include "../lwip/src/core/stats.c"
+#include "../lwip/src/core/sys.c"
+#include "../lwip/src/core/tcp.c"
+#include "../lwip/src/core/tcp_in.c"
+#include "../lwip/src/core/tcp_out.c"
+#include "../lwip/src/core/timeouts.c"
+#include "../lwip/src/core/ipv4/ip4.c"
+#include "../lwip/src/core/ipv4/ip4_addr.c"

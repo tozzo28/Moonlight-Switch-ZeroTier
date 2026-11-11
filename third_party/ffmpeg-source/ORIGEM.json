@@ -1,0 +1,7 @@
+{
+  "revision_in_binary": "N-117227-ge932809b8f",
+  "repository": "https://github.com/averne/FFmpeg",
+  "commit": "e932809b8fc4c2a434cc2f2360e0e12de901b268",
+  "source_archive_sha256": "008238691d6ab81f36ae0b555170d7a2ac5bec89ec88fe2ac200e065043aa9d5",
+  "basis": "Revision string embedded in verified upstream FFmpeg libraries; not a binary reproducibility claim."
+}

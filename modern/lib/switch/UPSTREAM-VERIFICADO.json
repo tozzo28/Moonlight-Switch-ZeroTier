@@ -1,0 +1,29 @@
+{
+  "upstream_commit": "4d093fe7c5f6a3b7d7c431ca4ba4903a391f008e",
+  "libraries": [
+    {
+      "file": "libavcodec.a",
+      "sha256": "550060aaf04ebf258d67a6dd00469d92ffcc1b2e990ef68165aa24f41a0a6a59",
+      "git_blob": "d8f11a585aba956b5d529b5ceac48f22229cd71f",
+      "source_url": "https://github.com/XITRIX/Moonlight-Switch/blob/4d093fe7c5f6a3b7d7c431ca4ba4903a391f008e/lib/switch/libavcodec.a"
+    },
+    {
+      "file": "libavformat.a",
+      "sha256": "709979003af6ffc22e6fe4b78575471cf40fd27218559286ebd8401e22f46fc9",
+      "git_blob": "c6675d6fa8b42f9b7e5892bd7d82d2f0a28439d4",
+      "source_url": "https://github.com/XITRIX/Moonlight-Switch/blob/4d093fe7c5f6a3b7d7c431ca4ba4903a391f008e/lib/switch/libavformat.a"
+    },
+    {
+      "file": "libavutil.a",
+      "sha256": "8d5b37701c47c1b0b5872436ec06905aca4fc9b2934b7f5e69cdabb5d4db0978",
+      "git_blob": "9ee6414ccc42df38f201a7fe0b7616d4003c5239",
+      "source_url": "https://github.com/XITRIX/Moonlight-Switch/blob/4d093fe7c5f6a3b7d7c431ca4ba4903a391f008e/lib/switch/libavutil.a"
+    },
+    {
+      "file": "libswresample.a",
+      "sha256": "62033c12e3af55bfdc8fe59d387f605961620f0bfc7bb60b9c402ce8fe99ce85",
+      "git_blob": "bffe3484dea213c9539a3f83dc6950197df5cec6",
+      "source_url": "https://github.com/XITRIX/Moonlight-Switch/blob/4d093fe7c5f6a3b7d7c431ca4ba4903a391f008e/lib/switch/libswresample.a"
+    }
+  ]
+}
